@@ -387,8 +387,44 @@ static struct {
     .cond = PTHREAD_COND_INITIALIZER,
 };
 
+static struct {
+    pthread_mutex_t lock;
+    uint64_t window_start_ms;
+    uint64_t last_frame_ms;
+    uint32_t frame_count;
+    float fps;
+} g_fps_state = {
+    .lock = PTHREAD_MUTEX_INITIALIZER,
+};
+
+static void update_android_fps_counter(void)
+{
+    const uint64_t now_ms = (uint64_t)SDL_GetTicks64();
+
+    pthread_mutex_lock(&g_fps_state.lock);
+
+    if (g_fps_state.window_start_ms == 0) {
+        g_fps_state.window_start_ms = now_ms;
+    }
+
+    g_fps_state.last_frame_ms = now_ms;
+    g_fps_state.frame_count++;
+
+    const uint64_t elapsed_ms = now_ms - g_fps_state.window_start_ms;
+    if (elapsed_ms >= 500) {
+        g_fps_state.fps = ((float)g_fps_state.frame_count * 1000.0f) /
+                          (float)elapsed_ms;
+        g_fps_state.frame_count = 0;
+        g_fps_state.window_start_ms = now_ms;
+    }
+
+    pthread_mutex_unlock(&g_fps_state.lock);
+}
+
 void xemu_android_process_snapshot_request(void)
 {
+    update_android_fps_counter();
+
     if (pthread_mutex_trylock(&g_snap_req.lock) != 0) {
         return;
     }
@@ -459,4 +495,28 @@ Java_com_izzy2lost_x1box_MainActivity_nativeLoadSnapshot(
 {
     (void)obj;
     return dispatch_snapshot(env, name, SNAP_LOAD);
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_izzy2lost_x1box_MainActivity_nativeGetFps(
+        JNIEnv *env, jobject obj)
+{
+    float fps = 0.0f;
+    const uint64_t now_ms = (uint64_t)SDL_GetTicks64();
+    (void)env;
+    (void)obj;
+
+    pthread_mutex_lock(&g_fps_state.lock);
+    fps = g_fps_state.fps;
+    if (g_fps_state.last_frame_ms == 0 ||
+        (now_ms - g_fps_state.last_frame_ms) > 1500) {
+        fps = 0.0f;
+    }
+    pthread_mutex_unlock(&g_fps_state.lock);
+
+    if (fps < 0.0f) {
+        fps = 0.0f;
+    }
+
+    return (jfloat)fps;
 }
