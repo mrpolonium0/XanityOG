@@ -29,6 +29,10 @@
 #include "debug.h"
 #include "renderer.h"
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+
 static GLenum get_gl_primitive_mode(enum ShaderPrimitiveMode primitive_mode)
 {
     switch (primitive_mode) {
@@ -38,6 +42,31 @@ static GLenum get_gl_primitive_mode(enum ShaderPrimitiveMode primitive_mode)
     default:
         assert(!"Invalid primitive_mode");
         return 0;
+    }
+}
+
+static void log_shader_source_with_line_numbers(const char *name,
+                                                const char *code)
+{
+    int line_no = 1;
+    const char *line = code;
+
+    while (line && *line) {
+        const char *line_end = strchr(line, '\n');
+        size_t len = line_end ? (size_t)(line_end - line) : strlen(line);
+
+#ifdef __ANDROID__
+        __android_log_print(ANDROID_LOG_ERROR, "xemu-android",
+                            "%s %4d | %.*s", name, line_no, (int)len, line);
+#endif
+        fprintf(stderr, "%s %4d | %.*s\n", name, line_no, (int)len, line);
+
+        if (!line_end) {
+            break;
+        }
+
+        line = line_end + 1;
+        line_no++;
     }
 }
 
@@ -64,7 +93,12 @@ static GLuint create_gl_shader(GLenum gl_shader_type,
         glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &log_length);
         log = g_malloc(log_length * sizeof(GLchar));
         glGetShaderInfoLog(shader, log_length, NULL, log);
-        fprintf(stderr, "%s\n\n" "nv2a: %s compilation failed: %s\n", code, name, log);
+#ifdef __ANDROID__
+        __android_log_print(ANDROID_LOG_ERROR, "xemu-android",
+                            "nv2a: %s compilation failed: %s", name, log);
+#endif
+        fprintf(stderr, "nv2a: %s compilation failed: %s\n", name, log);
+        log_shader_source_with_line_numbers(name, code);
         g_free(log);
 
         NV2A_GL_DGROUP_END();

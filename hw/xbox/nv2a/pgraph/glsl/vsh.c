@@ -229,7 +229,7 @@ MString *pgraph_glsl_gen_vsh(const VshState *state, GenVshGlslOptions opts)
         // fractional part and to convert floating-point coordinates by
         // by truncating (not flooring).
         "vec2 roundScreenCoords(vec2 pos) {\n"
-        "  return trunc(pos * 16.0f) / 16.0f;\n"
+        "  return trunc(pos * 16.0) / 16.0;\n"
         "}\n");
 
     pgraph_glsl_get_vtx_header(header, opts.vulkan, state->smooth_shading,

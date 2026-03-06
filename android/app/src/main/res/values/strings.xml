@@ -80,6 +80,13 @@
   <string name="settings_save">Save</string>
 
   <string name="settings_section_display">Display</string>
+  <string name="settings_graphics_api">Graphics API</string>
+  <string name="settings_graphics_api_vulkan">Vulkan</string>
+  <string name="settings_graphics_api_opengl">OpenGL ES</string>
+  <string name="settings_filtering">Display Filtering</string>
+  <string name="settings_filtering_linear">Linear</string>
+  <string name="settings_filtering_nearest">Nearest</string>
+  <string name="settings_vsync">VSync</string>
   <string name="settings_section_vulkan_driver">Custom Vulkan Driver</string>
   <string name="settings_vulkan_driver_none">System Default</string>
   <string name="settings_vulkan_driver_browse">Browse…</string>

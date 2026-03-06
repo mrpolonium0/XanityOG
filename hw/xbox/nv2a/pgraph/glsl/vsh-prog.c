@@ -696,7 +696,7 @@ static const char* vsh_header =
     "vec4 _LOG(float src)\n"
     "{\n"
     "  float tmp = abs(src);\n"
-    "  if (tmp == 0.0) { return vec4(-INFINITY, 1.0f, -INFINITY, 1.0f); }\n"
+    "  if (tmp == 0.0) { return vec4(-INFINITY, 1.0, -INFINITY, 1.0); }\n"
     "  vec4 result;\n"
     "  result.x = floor(log2(tmp));\n"
     "  result.y = tmp / exp2(floor(log2(tmp)));\n"
@@ -757,7 +757,7 @@ void pgraph_glsl_gen_vsh_prog(uint16_t version, const uint32_t *tokens,
         "  oPos.xy = roundScreenCoords(oPos.xy);\n"
         "  oPos.w = clampAwayZeroInf(oPos.w);\n"
         "  vec4 vtxPos = oPos;\n"
-        "  oPos.xy = (2.0f * oPos.xy - surfaceSize) / surfaceSize;\n"
+        "  oPos.xy = (2.0 * oPos.xy - surfaceSize) / surfaceSize;\n"
         "  oPos.z = oPos.z / clipRange.y;\n"
 
         /* Undo perspective divide by w.

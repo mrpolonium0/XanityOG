@@ -8,6 +8,7 @@
 #include <SDL_syswm.h>
 
 #include "ui/kbd-state.h"
+#include "ui/shader.h"
 
 // FIXME: Cleanup
 struct sdl2_console {
@@ -26,6 +27,7 @@ struct sdl2_console {
     int idle_counter;
     int ignore_hotkeys;
     SDL_GLContext winctx;
+    QemuGLShader *gls;
     QKbdState *kbd;
     bool y0_top;
     bool scanout_mode;

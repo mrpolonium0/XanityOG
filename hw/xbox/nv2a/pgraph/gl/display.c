@@ -26,179 +26,109 @@
 #include "renderer.h"
 
 #include <math.h>
-
 #ifdef __ANDROID__
 #include <android/log.h>
-#include "qemu/thread.h"
-#include <string.h>
-#include "system/memory.h"
 #endif
 
 #ifdef __ANDROID__
-static void check_gl_error_android(const char *context)
+static void gl_log_errors(const char *ctx)
 {
-    GLenum err;
-    int count = 0;
-    while ((err = glGetError()) != GL_NO_ERROR) {
-        fprintf(stderr, "GL error 0x%X in %s\n", err, context);
-        if (++count >= 10) {
-            break;
-        }
+    GLenum gl_err;
+
+    while ((gl_err = glGetError()) != GL_NO_ERROR) {
+        __android_log_print(ANDROID_LOG_WARN, "xemu-android",
+            "GL error 0x%X at %s", gl_err, ctx);
     }
 }
-#define GL_ASSERT_NO_ERROR(context) check_gl_error_android(context)
+
+#define GL_ASSERT_NO_ERROR(ctx) gl_log_errors(ctx)
 #else
 #define GL_ASSERT_NO_ERROR(context) assert(glGetError() == GL_NO_ERROR)
 #endif
 
 #ifdef __ANDROID__
-static QemuMutex g_android_readback_mutex;
-static bool g_android_readback_mutex_init = false;
-static uint8_t *g_android_readback_buf = NULL;
-static size_t g_android_readback_size = 0;
-static int g_android_readback_w = 0;
-static int g_android_readback_h = 0;
-static bool g_android_readback_ready = false;
+typedef struct AndroidDisplayGLState {
+    GLint framebuffer;
+    GLint program;
+    GLint vertex_array;
+    GLint array_buffer;
+    GLint active_texture;
+    GLint texture_2d_unit0;
+    GLint viewport[4];
+    GLboolean color_mask[4];
+    GLfloat clear_color[4];
+    GLboolean scissor_test;
+    GLboolean blend;
+    GLboolean stencil_test;
+    GLboolean cull_face;
+    GLboolean depth_test;
+} AndroidDisplayGLState;
 
-static bool android_force_cpu_blit(void)
+static void android_display_capture_gl_state(AndroidDisplayGLState *state)
 {
-    static int cached = -1;
-    if (cached < 0) {
-        const char *env = getenv("XEMU_ANDROID_FORCE_CPU_BLIT");
-        if (!env) {
-            cached = 1;
-        } else if (!strcmp(env, "1") || !strcmp(env, "true") ||
-                   !strcmp(env, "TRUE")) {
-            cached = 1;
-        } else {
-            cached = 0;
-        }
-    }
-    return cached == 1;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &state->framebuffer);
+    glGetIntegerv(GL_CURRENT_PROGRAM, &state->program);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &state->vertex_array);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &state->array_buffer);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &state->active_texture);
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &state->texture_2d_unit0);
+    glActiveTexture(state->active_texture);
+    glGetIntegerv(GL_VIEWPORT, state->viewport);
+    glGetBooleanv(GL_COLOR_WRITEMASK, state->color_mask);
+    glGetFloatv(GL_COLOR_CLEAR_VALUE, state->clear_color);
+    state->scissor_test = glIsEnabled(GL_SCISSOR_TEST);
+    state->blend = glIsEnabled(GL_BLEND);
+    state->stencil_test = glIsEnabled(GL_STENCIL_TEST);
+    state->cull_face = glIsEnabled(GL_CULL_FACE);
+    state->depth_test = glIsEnabled(GL_DEPTH_TEST);
 }
 
-static bool android_readback_is_black(const uint8_t *buf, size_t size,
-                                      int width, int height)
+static void android_display_restore_gl_state(
+    const AndroidDisplayGLState *state)
 {
-    if (!buf || size < 4 || width <= 0 || height <= 0) {
-        return false;
-    }
-    size_t tl_off = 0;
-    size_t mid_off = ((size_t)(height / 2) * (size_t)width +
-                      (size_t)(width / 2)) * 4;
-    size_t br_off = ((size_t)(height - 1) * (size_t)width +
-                     (size_t)(width - 1)) * 4;
-    uint32_t tl = 0, mid = 0, br = 0;
-    if (tl_off + 4 <= size) {
-        memcpy(&tl, buf + tl_off, sizeof(tl));
-    }
-    if (mid_off + 4 <= size) {
-        memcpy(&mid, buf + mid_off, sizeof(mid));
-    }
-    if (br_off + 4 <= size) {
-        memcpy(&br, buf + br_off, sizeof(br));
-    }
-    bool black_tl = (tl == 0x00000000u || tl == 0xff000000u);
-    bool black_mid = (mid == 0x00000000u || mid == 0xff000000u);
-    bool black_br = (br == 0x00000000u || br == 0xff000000u);
-    return black_tl && black_mid && black_br;
-}
+    glBindFramebuffer(GL_FRAMEBUFFER, state->framebuffer);
+    glUseProgram(state->program);
+    glBindVertexArray(state->vertex_array);
+    glBindBuffer(GL_ARRAY_BUFFER, state->array_buffer);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, state->texture_2d_unit0);
+    glActiveTexture(state->active_texture);
+    glViewport(state->viewport[0], state->viewport[1],
+               state->viewport[2], state->viewport[3]);
+    glColorMask(state->color_mask[0], state->color_mask[1],
+                state->color_mask[2], state->color_mask[3]);
+    glClearColor(state->clear_color[0], state->clear_color[1],
+                 state->clear_color[2], state->clear_color[3]);
 
-static void android_store_readback(NV2AState *d, SurfaceBinding *surface,
-                                   int width, int height)
-{
-    if (width <= 0 || height <= 0) {
-        return;
+    if (state->scissor_test) {
+        glEnable(GL_SCISSOR_TEST);
+    } else {
+        glDisable(GL_SCISSOR_TEST);
     }
-    if (!g_android_readback_mutex_init) {
-        qemu_mutex_init(&g_android_readback_mutex);
-        g_android_readback_mutex_init = true;
+    if (state->blend) {
+        glEnable(GL_BLEND);
+    } else {
+        glDisable(GL_BLEND);
     }
-    size_t needed = (size_t)width * (size_t)height * 4;
-    qemu_mutex_lock(&g_android_readback_mutex);
-    if (needed > g_android_readback_size) {
-        g_android_readback_buf = g_realloc(g_android_readback_buf, needed);
-        g_android_readback_size = needed;
+    if (state->stencil_test) {
+        glEnable(GL_STENCIL_TEST);
+    } else {
+        glDisable(GL_STENCIL_TEST);
     }
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE,
-                 g_android_readback_buf);
-    glPixelStorei(GL_PACK_ALIGNMENT, 4);
-    bool display_black = android_readback_is_black(
-        g_android_readback_buf, g_android_readback_size, width, height);
-    bool used_surface = false;
-    if (display_black && d && surface && surface->gl_buffer) {
-        PGRAPHState *pg = &d->pgraph;
-        PGRAPHGLState *r = pg->gl_renderer_state;
-        unsigned int surf_w = surface->width;
-        unsigned int surf_h = surface->height;
-        pgraph_apply_scaling_factor(pg, &surf_w, &surf_h);
-        if (surf_w > 0 && surf_h > 0) {
-            size_t surf_needed = (size_t)surf_w * (size_t)surf_h * 4;
-            if (surf_needed > g_android_readback_size) {
-                g_android_readback_buf = g_realloc(g_android_readback_buf,
-                                                   surf_needed);
-                g_android_readback_size = surf_needed;
-            }
-            GLint prev_fbo = 0;
-            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
-            glBindFramebuffer(GL_FRAMEBUFFER, r->disp_rndr.fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                   GL_TEXTURE_2D, surface->gl_buffer, 0);
-            glPixelStorei(GL_PACK_ALIGNMENT, 1);
-            glReadPixels(0, 0, surf_w, surf_h, GL_RGBA, GL_UNSIGNED_BYTE,
-                         g_android_readback_buf);
-            glPixelStorei(GL_PACK_ALIGNMENT, 4);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                   GL_TEXTURE_2D, r->gl_display_buffer, 0);
-            glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo);
-            g_android_readback_w = (int)surf_w;
-            g_android_readback_h = (int)surf_h;
-            used_surface = true;
-            static unsigned int surf_log = 0;
-            if ((surf_log++ % 120) == 0) {
-                __android_log_print(ANDROID_LOG_WARN, "xemu-android",
-                                    "android readback: display black, using surface vram=0x%x size=%ux%u",
-                                    (unsigned)surface->vram_addr,
-                                    surf_w, surf_h);
-            }
-        }
+    if (state->cull_face) {
+        glEnable(GL_CULL_FACE);
+    } else {
+        glDisable(GL_CULL_FACE);
     }
-    if (!used_surface) {
-        g_android_readback_w = width;
-        g_android_readback_h = height;
+    if (state->depth_test) {
+        glEnable(GL_DEPTH_TEST);
+    } else {
+        glDisable(GL_DEPTH_TEST);
     }
-    g_android_readback_ready = true;
-    qemu_mutex_unlock(&g_android_readback_mutex);
 }
-
-bool nv2a_android_copy_readback(uint8_t **buffer, size_t *buffer_size,
-                                int *width, int *height)
-{
-    if (!android_force_cpu_blit()) {
-        return false;
-    }
-    if (!g_android_readback_mutex_init || !g_android_readback_ready) {
-        return false;
-    }
-    qemu_mutex_lock(&g_android_readback_mutex);
-    size_t needed = (size_t)g_android_readback_w * (size_t)g_android_readback_h * 4;
-    if (!g_android_readback_buf || needed == 0) {
-        qemu_mutex_unlock(&g_android_readback_mutex);
-        return false;
-    }
-    if (*buffer_size < needed) {
-        *buffer = g_realloc(*buffer, needed);
-        *buffer_size = needed;
-    }
-    memcpy(*buffer, g_android_readback_buf, needed);
-    *width = g_android_readback_w;
-    *height = g_android_readback_h;
-    qemu_mutex_unlock(&g_android_readback_mutex);
-    return true;
-}
-
 #endif
+
 
 void pgraph_gl_init_display(NV2AState *d)
 {
@@ -556,16 +486,6 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
     glDrawBuffers(1, DrawBuffers);
     GLenum fb_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     if (fb_status != GL_FRAMEBUFFER_COMPLETE) {
-#ifdef __ANDROID__
-        __android_log_print(ANDROID_LOG_ERROR, "xemu-android",
-                            "render_display: framebuffer incomplete 0x%X (fmt=%d ifmt=%d type=%d size=%ux%u)",
-                            fb_status,
-                            r->gl_display_buffer_format,
-                            r->gl_display_buffer_internal_format,
-                            r->gl_display_buffer_type,
-                            r->gl_display_buffer_width,
-                            r->gl_display_buffer_height);
-#else
         fprintf(stderr,
                 "render_display: framebuffer incomplete 0x%X (fmt=%d ifmt=%d type=%d size=%ux%u)\n",
                 fb_status,
@@ -574,7 +494,6 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
                 r->gl_display_buffer_type,
                 r->gl_display_buffer_width,
                 r->gl_display_buffer_height);
-#endif
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                GL_TEXTURE_2D, 0, 0);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -582,44 +501,13 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
     }
 
     glBindTexture(GL_TEXTURE_2D, surface->gl_buffer);
-#ifdef __ANDROID__
-    bool clip_enable = false;
-    float clip_x = 0.0f;
-    float clip_y = 0.0f;
-    float clip_w = 0.0f;
-    float clip_h = 0.0f;
-    if (android_force_cpu_blit()) {
-        clip_x = (float)surface->shape.clip_x;
-        clip_y = (float)surface->shape.clip_y;
-        clip_w = (float)surface->shape.clip_width;
-        clip_h = (float)surface->shape.clip_height;
-        if (clip_w > 0.0f && clip_h > 0.0f) {
-            clip_enable = true;
-            static unsigned int clip_log = 0;
-            if ((clip_log++ % 120) == 0) {
-                GLint tex_w = 0;
-                GLint tex_h = 0;
-                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tex_w);
-                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &tex_h);
-                __android_log_print(ANDROID_LOG_WARN, "xemu-android",
-                                    "render_display: clip rect x=%g y=%g w=%g h=%g tex=%dx%d disp=%ux%u",
-                                    clip_x, clip_y, clip_w, clip_h,
-                                    (int)tex_w, (int)tex_h,
-                                    width, height);
-            }
-        }
-    }
-#endif
     glBindVertexArray(r->disp_rndr.vao);
     glBindBuffer(GL_ARRAY_BUFFER, r->disp_rndr.vbo);
     glUseProgram(r->disp_rndr.prog);
     glProgramUniform1i(r->disp_rndr.prog, r->disp_rndr.tex_loc, 0);
     glUniform2f(r->disp_rndr.display_size_loc, width, height);
     glUniform1f(r->disp_rndr.line_offset_loc, line_offset);
-#ifdef __ANDROID__
-    glUniform1i(r->disp_rndr.clip_enable_loc, clip_enable ? 1 : 0);
-    glUniform4f(r->disp_rndr.clip_rect_loc, clip_x, clip_y, clip_w, clip_h);
-#endif
+    glUniform1i(r->disp_rndr.clip_enable_loc, 0);
     render_display_pvideo_overlay(d);
 
     glViewport(0, 0, width, height);
@@ -629,16 +517,12 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
     glDisable(GL_STENCIL_TEST);
     glDisable(GL_CULL_FACE);
     glDisable(GL_DEPTH_TEST);
+#ifndef __ANDROID__ /* glPolygonMode not available in GLES 3.x core */
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+#endif
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     glDrawArrays(GL_TRIANGLES, 0, 3);
-
-#ifdef __ANDROID__
-    if (android_force_cpu_blit()) {
-        android_store_readback(d, surface, width, height);
-    }
-#endif
 
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
         GL_TEXTURE_2D, 0, 0);
@@ -646,11 +530,17 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
 
 static void gl_fence(void)
 {
+#ifdef __ANDROID__
+    /* Shared-context sync objects are still producing invalid-operation
+     * failures on Adreno. Favor correctness over throughput here. */
+    glFinish();
+#else
     GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     int result = glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT,
                                          (GLuint64)(5000000000));
     assert(result == GL_CONDITION_SATISFIED || result == GL_ALREADY_SIGNALED);
     glDeleteSync(fence);
+#endif
 }
 
 void pgraph_gl_sync(NV2AState *d)
@@ -677,29 +567,27 @@ void pgraph_gl_sync(NV2AState *d)
 
     /* Wait for queued commands to complete */
 #ifdef __ANDROID__
-    bool force_upload = !tcg_enabled();
-    if (android_force_cpu_blit() && surface->draw_time == 0) {
-        force_upload = true;
-        static unsigned int no_draw_log = 0;
-        if ((no_draw_log++ % 120) == 0) {
-            __android_log_print(ANDROID_LOG_WARN, "xemu-android",
-                                "pgraph_gl_sync: forcing upload (no draws yet) vram=0x%x",
-                                (unsigned)surface->vram_addr);
-        }
-    }
-    pgraph_gl_upload_surface_data(d, surface, force_upload);
-#else
-    pgraph_gl_upload_surface_data(d, surface, !tcg_enabled());
+    GL_ASSERT_NO_ERROR("pgraph_gl_sync: pre-upload");
 #endif
+    pgraph_gl_upload_surface_data(d, surface, !tcg_enabled());
+    GL_ASSERT_NO_ERROR("pgraph_gl_sync: surface upload");
     gl_fence();
-    GL_ASSERT_NO_ERROR("pgraph_gl_sync: upload fence");
+    GL_ASSERT_NO_ERROR("pgraph_gl_sync: upload finish");
 
     /* Render framebuffer */
 #ifdef __ANDROID__
-    glo_set_current(g_nv2a_context_render);
-    render_display(d, surface);
-    gl_fence();
-    GL_ASSERT_NO_ERROR("pgraph_gl_sync: render fence");
+    {
+        AndroidDisplayGLState state;
+
+        glo_set_current(g_nv2a_context_render);
+        GL_ASSERT_NO_ERROR("pgraph_gl_sync: pre-render");
+        android_display_capture_gl_state(&state);
+        render_display(d, surface);
+        GL_ASSERT_NO_ERROR("pgraph_gl_sync: render display");
+        android_display_restore_gl_state(&state);
+        gl_fence();
+        GL_ASSERT_NO_ERROR("pgraph_gl_sync: render finish");
+    }
 #else
     /* Render framebuffer in display context */
     glo_set_current(g_nv2a_context_display);

@@ -262,6 +262,8 @@ GLSL_DEFINE(materialEmissionColor, GLSL_LTCTXA(NV_IGRAPH_XF_LTCTXA_CM_COL) ".xyz
         static char alpha_source_specular[] = "specular.a";
         static char alpha_source_material[] = "material_alpha";
         const char *alpha_source = alpha_source_diffuse;
+        const char *ambient_source_rgb = "diffuse.rgb";
+        const char *emission_source_rgb = "diffuse.rgb";
         if (state->fixed_function.diffuse_src == MATERIAL_COLOR_SRC_MATERIAL) {
             alpha_source = alpha_source_material;
         } else if (state->fixed_function.diffuse_src == MATERIAL_COLOR_SRC_SPECULAR) {
@@ -269,21 +271,23 @@ GLSL_DEFINE(materialEmissionColor, GLSL_LTCTXA(NV_IGRAPH_XF_LTCTXA_CM_COL) ".xyz
         }
 
         if (state->fixed_function.ambient_src == MATERIAL_COLOR_SRC_MATERIAL) {
-            mstring_append_fmt(body, "oD0 = vec4(sceneAmbientColor, %s);\n", alpha_source);
+            ambient_source_rgb = "materialEmissionColor.rgb";
         } else if (state->fixed_function.ambient_src == MATERIAL_COLOR_SRC_DIFFUSE) {
-            mstring_append_fmt(body, "oD0 = vec4(diffuse.rgb, %s);\n", alpha_source);
+            ambient_source_rgb = "diffuse.rgb";
         } else if (state->fixed_function.ambient_src == MATERIAL_COLOR_SRC_SPECULAR) {
-            mstring_append_fmt(body, "oD0 = vec4(specular.rgb, %s);\n", alpha_source);
+            ambient_source_rgb = "specular.rgb";
         }
 
-        mstring_append(body, "oD0.rgb *= materialEmissionColor.rgb;\n");
         if (state->fixed_function.emission_src == MATERIAL_COLOR_SRC_MATERIAL) {
-            mstring_append(body, "oD0.rgb += sceneAmbientColor;\n");
+            emission_source_rgb = "materialEmissionColor.rgb";
         } else if (state->fixed_function.emission_src == MATERIAL_COLOR_SRC_DIFFUSE) {
-            mstring_append(body, "oD0.rgb += diffuse.rgb;\n");
+            emission_source_rgb = "diffuse.rgb";
         } else if (state->fixed_function.emission_src == MATERIAL_COLOR_SRC_SPECULAR) {
-            mstring_append(body, "oD0.rgb += specular.rgb;\n");
+            emission_source_rgb = "specular.rgb";
         }
+        mstring_append_fmt(body, "oD0 = vec4(sceneAmbientColor * %s, %s);\n",
+                           ambient_source_rgb, alpha_source);
+        mstring_append_fmt(body, "oD0.rgb += %s;\n", emission_source_rgb);
 
         mstring_append(body, "oD1 = vec4(0.0, 0.0, 0.0, specular.a);\n");
 
@@ -349,7 +353,7 @@ GLSL_DEFINE(materialEmissionColor, GLSL_LTCTXA(NV_IGRAPH_XF_LTCTXA_CM_COL) ".xyz
                 /* https://docs.microsoft.com/en-us/windows/win32/direct3d9/attenuation-and-spotlight-factor#spotlight-factor */
                 mstring_append_fmt(body,
                     "    vec4 spotDir = lightSpotDirection(%d);\n"
-                    "    float invScale = 1/length(spotDir.xyz);\n"
+                    "    float invScale = 1.0 / length(spotDir.xyz);\n"
                     "    float cosHalfPhi = -invScale*spotDir.w;\n"
                     "    float cosHalfTheta = invScale + cosHalfPhi;\n"
                     "    float spotDirDotVP = dot(spotDir.xyz, VP);\n"
@@ -485,7 +489,7 @@ GLSL_DEFINE(materialEmissionColor, GLSL_LTCTXA(NV_IGRAPH_XF_LTCTXA_CM_COL) ".xyz
     "  oPos.xy = roundScreenCoords(oPos.xy);\n"
     "  vec4 vtxPos = vec4(oPos.xy, oPos.z / oPos.w, oPos.w);\n"
     "  oPos.z = oPos.z / clipRange.y;\n"
-    "  oPos.xy = (2.0f * oPos.xy - surfaceSize) / surfaceSize;\n"
+    "  oPos.xy = (2.0 * oPos.xy - surfaceSize) / surfaceSize;\n"
     "  oPos.xy *= oPos.w;\n"
     );
 
@@ -495,7 +499,7 @@ GLSL_DEFINE(materialEmissionColor, GLSL_LTCTXA(NV_IGRAPH_XF_LTCTXA_CM_COL) ".xyz
             "  float d_e = length(position * modelViewMat0);\n"
             "  float ptMinSize = min(pointParams[7], 63.875);\n"
             "  float ptMaxSize = min(pointParams[3] + ptMinSize, 63.875);\n"
-            "  oPts.x = 1/sqrt(pointParams[0] + pointParams[1] * d_e + pointParams[2] * d_e * d_e) + pointParams[6];\n");
+            "  oPts.x = 1.0 / sqrt(pointParams[0] + pointParams[1] * d_e + pointParams[2] * d_e * d_e) + pointParams[6];\n");
         mstring_append_fmt(body,
                            "  oPts.x = clamp(oPts.x * pointParams[3] + pointParams[7], ptMinSize, ptMaxSize) * float(%d);\n",
                            state->surface_scale_factor);

@@ -79,6 +79,8 @@ class SettingsActivity : AppCompatActivity() {
     super.onCreate(savedInstanceState)
     setContentView(R.layout.activity_settings)
 
+    val toggleGraphicsApi = findViewById<MaterialButtonToggleGroup>(R.id.toggle_graphics_api)
+    val toggleFiltering   = findViewById<MaterialButtonToggleGroup>(R.id.toggle_filtering)
     val toggleScale       = findViewById<MaterialButtonToggleGroup>(R.id.toggle_resolution_scale)
     val btn1x             = findViewById<MaterialButton>(R.id.btn_scale_1x)
     val btn2x             = findViewById<MaterialButton>(R.id.btn_scale_2x)
@@ -93,6 +95,7 @@ class SettingsActivity : AppCompatActivity() {
     val switchHrtf        = findViewById<MaterialSwitch>(R.id.switch_hrtf)
     val switchShaders     = findViewById<MaterialSwitch>(R.id.switch_cache_shaders)
     val switchFpu         = findViewById<MaterialSwitch>(R.id.switch_hard_fpu)
+    val switchVsync       = findViewById<MaterialSwitch>(R.id.switch_vsync)
     val switchSkipBootAnim = findViewById<MaterialSwitch>(R.id.switch_skip_boot_anim)
     val toggleAudioDriver = findViewById<MaterialButtonToggleGroup>(R.id.toggle_audio_driver)
     val btnSave           = findViewById<MaterialButton>(R.id.btn_settings_save)
@@ -106,6 +109,20 @@ class SettingsActivity : AppCompatActivity() {
     dropdownEepromVideoStandard = findViewById(R.id.dropdown_eeprom_video_standard)
 
     // Load current values
+    val renderer = prefs.getString("setting_renderer", "vulkan") ?: "vulkan"
+    if (renderer == "opengl") {
+      toggleGraphicsApi.check(R.id.btn_renderer_opengl)
+    } else {
+      toggleGraphicsApi.check(R.id.btn_renderer_vulkan)
+    }
+
+    val filtering = prefs.getString("setting_filtering", "linear") ?: "linear"
+    if (filtering == "nearest") {
+      toggleFiltering.check(R.id.btn_filtering_nearest)
+    } else {
+      toggleFiltering.check(R.id.btn_filtering_linear)
+    }
+
     val scale = prefs.getInt("setting_surface_scale", 1)
     when (scale) {
       2    -> toggleScale.check(R.id.btn_scale_2x)
@@ -147,6 +164,7 @@ class SettingsActivity : AppCompatActivity() {
     switchHrtf.isChecked    = prefs.getBoolean("setting_hrtf", true)
     switchShaders.isChecked = prefs.getBoolean("setting_cache_shaders", true)
     switchFpu.isChecked     = prefs.getBoolean("setting_hard_fpu", true)
+    switchVsync.isChecked   = prefs.getBoolean("setting_vsync", false)
     switchSkipBootAnim.isChecked =
       prefs.getBoolean("setting_skip_boot_anim", false)
 
@@ -199,6 +217,14 @@ class SettingsActivity : AppCompatActivity() {
         R.id.btn_audio_disabled  -> "dummy"
         else                     -> "openslES"
       }
+      val selectedRenderer = when (toggleGraphicsApi.checkedButtonId) {
+        R.id.btn_renderer_opengl -> "opengl"
+        else                     -> "vulkan"
+      }
+      val selectedFiltering = when (toggleFiltering.checkedButtonId) {
+        R.id.btn_filtering_nearest -> "nearest"
+        else                       -> "linear"
+      }
 
       val edit = prefs.edit()
         .putInt("setting_display_mode", selectedDisplayMode)
@@ -210,8 +236,11 @@ class SettingsActivity : AppCompatActivity() {
         .putBoolean("setting_hrtf", switchHrtf.isChecked)
         .putBoolean("setting_cache_shaders", switchShaders.isChecked)
         .putBoolean("setting_hard_fpu", switchFpu.isChecked)
+        .putBoolean("setting_vsync", switchVsync.isChecked)
         .putBoolean("setting_skip_boot_anim", switchSkipBootAnim.isChecked)
         .putString("setting_audio_driver", selectedAudioDriver)
+        .putString("setting_filtering", selectedFiltering)
+        .putString("setting_renderer", selectedRenderer)
 
       when {
         clearVulkan -> edit

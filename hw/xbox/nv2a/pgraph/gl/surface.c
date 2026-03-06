@@ -34,23 +34,321 @@
 static void android_sanitize_surface_format(PGRAPHGLState *r,
                                             SurfaceFormatInfo *fmt)
 {
-    if (!r || !fmt) {
-        return;
+    /* Android keeps the guest surface format metadata intact and converts
+     * unsupported BGRA guest layouts at upload/readback time instead. */
+    (void)r;
+    (void)fmt;
+}
+
+static bool android_surface_uses_rgba8_transfer(const SurfaceBinding *surface)
+{
+    if (!surface || !surface->color) {
+        return false;
     }
-    if (fmt->gl_format == GL_BGRA) {
-        if (r->bgra_supported) {
-            // GLES BGRA path: force a byte-based type which is widely supported.
-            fmt->gl_type = GL_UNSIGNED_BYTE;
-        } else {
-            fmt->gl_format = GL_RGBA;
-            fmt->gl_type = GL_UNSIGNED_BYTE;
+
+    switch (surface->shape.color_format) {
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void android_surface_get_storage_format(const SurfaceBinding *surface,
+                                               GLint *internal_format,
+                                               GLenum *format,
+                                               GLenum *type)
+{
+    *internal_format = surface->fmt.gl_internal_format;
+    *format = surface->fmt.gl_format;
+    *type = surface->fmt.gl_type;
+
+    if (android_surface_uses_rgba8_transfer(surface)) {
+        *internal_format = GL_RGBA8;
+        *format = GL_RGBA;
+        *type = GL_UNSIGNED_BYTE;
+    }
+}
+
+static uint8_t android_expand_5_to_8(uint8_t value)
+{
+    return (value << 3) | (value >> 2);
+}
+
+static void android_surface_guest_to_rgba8(const SurfaceBinding *surface,
+                                           const uint8_t *src,
+                                           unsigned int width,
+                                           unsigned int height,
+                                           unsigned int src_stride,
+                                           uint8_t *dst)
+{
+    unsigned int x, y;
+
+    switch (surface->shape.color_format) {
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+        for (y = 0; y < height; y++) {
+            const uint8_t *src_row = src + y * src_stride;
+            uint8_t *dst_row = dst + y * width * 4;
+            for (x = 0; x < width; x++) {
+                uint16_t pixel = lduw_le_p(src_row + x * 2);
+                dst_row[x * 4 + 0] = android_expand_5_to_8((pixel >> 10) & 0x1F);
+                dst_row[x * 4 + 1] = android_expand_5_to_8((pixel >> 5) & 0x1F);
+                dst_row[x * 4 + 2] = android_expand_5_to_8(pixel & 0x1F);
+                dst_row[x * 4 + 3] = 0xFF;
+            }
         }
-        if (fmt->gl_internal_format == GL_RGB8) {
-            fmt->gl_internal_format = GL_RGBA8;
+        break;
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8:
+        for (y = 0; y < height; y++) {
+            const uint8_t *src_row = src + y * src_stride;
+            uint8_t *dst_row = dst + y * width * 4;
+            for (x = 0; x < width; x++) {
+                const uint8_t *pixel = src_row + x * 4;
+                dst_row[x * 4 + 0] = pixel[2];
+                dst_row[x * 4 + 1] = pixel[1];
+                dst_row[x * 4 + 2] = pixel[0];
+                dst_row[x * 4 + 3] =
+                    (surface->shape.color_format ==
+                     NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8)
+                        ? pixel[3]
+                        : 0xFF;
+            }
         }
-    } else if (fmt->gl_format == GL_BGR) {
-        fmt->gl_format = GL_RGB;
-        fmt->gl_type = GL_UNSIGNED_BYTE;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static bool android_surface_to_texture_needs_guest_reinterpretation(
+    const SurfaceBinding *surface,
+    const TextureShape *shape)
+{
+    switch (surface->shape.color_format) {
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+        return shape->color_format !=
+               NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X1R5G5B5 &&
+               shape->color_format !=
+               NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X1R5G5B5;
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
+        return false;
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8:
+        return shape->color_format !=
+               NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X8R8G8B8 &&
+               shape->color_format !=
+               NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X8R8G8B8;
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8:
+        return shape->color_format !=
+               NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8R8G8B8 &&
+               shape->color_format !=
+               NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A8R8G8B8;
+    default:
+        return true;
+    }
+}
+
+static void android_surface_guest_to_texture_rgba8(
+    const TextureShape *shape,
+    const uint8_t *src,
+    unsigned int width,
+    unsigned int height,
+    unsigned int src_stride,
+    uint8_t *dst)
+{
+    unsigned int x, y;
+
+    for (y = 0; y < height; y++) {
+        const uint8_t *src_row = src + y * src_stride;
+        uint8_t *dst_row = dst + y * width * 4;
+
+        for (x = 0; x < width; x++) {
+            uint8_t *out = dst_row + x * 4;
+
+            switch (shape->color_format) {
+            case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A1R5G5B5:
+            case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A1R5G5B5: {
+                uint16_t pixel = lduw_le_p(src_row + x * 2);
+                out[0] = android_expand_5_to_8((pixel >> 10) & 0x1F);
+                out[1] = android_expand_5_to_8((pixel >> 5) & 0x1F);
+                out[2] = android_expand_5_to_8(pixel & 0x1F);
+                out[3] = (pixel & 0x8000) ? 0xFF : 0x00;
+                break;
+            }
+            case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X1R5G5B5:
+            case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X1R5G5B5: {
+                uint16_t pixel = lduw_le_p(src_row + x * 2);
+                out[0] = android_expand_5_to_8((pixel >> 10) & 0x1F);
+                out[1] = android_expand_5_to_8((pixel >> 5) & 0x1F);
+                out[2] = android_expand_5_to_8(pixel & 0x1F);
+                out[3] = 0xFF;
+                break;
+            }
+            case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R5G6B5:
+            case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R5G6B5: {
+                uint16_t pixel = lduw_le_p(src_row + x * 2);
+                out[0] = android_expand_5_to_8((pixel >> 11) & 0x1F);
+                out[1] = (uint8_t)(((pixel >> 5) & 0x3F) * 255 / 63);
+                out[2] = android_expand_5_to_8(pixel & 0x1F);
+                out[3] = 0xFF;
+                break;
+            }
+            case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8R8G8B8:
+            case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A8R8G8B8: {
+                const uint8_t *pixel = src_row + x * 4;
+                out[0] = pixel[2];
+                out[1] = pixel[1];
+                out[2] = pixel[0];
+                out[3] = pixel[3];
+                break;
+            }
+            case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X8R8G8B8:
+            case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X8R8G8B8: {
+                const uint8_t *pixel = src_row + x * 4;
+                out[0] = pixel[2];
+                out[1] = pixel[1];
+                out[2] = pixel[0];
+                out[3] = 0xFF;
+                break;
+            }
+            case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8B8G8R8:
+            case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A8B8G8R8: {
+                const uint8_t *pixel = src_row + x * 4;
+                out[0] = pixel[0];
+                out[1] = pixel[1];
+                out[2] = pixel[2];
+                out[3] = pixel[3];
+                break;
+            }
+            case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_B8G8R8A8:
+            case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_B8G8R8A8: {
+                const uint8_t *pixel = src_row + x * 4;
+                out[0] = pixel[1];
+                out[1] = pixel[2];
+                out[2] = pixel[3];
+                out[3] = pixel[0];
+                break;
+            }
+            case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R8G8B8A8:
+            case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R8G8B8A8: {
+                const uint8_t *pixel = src_row + x * 4;
+                out[0] = pixel[3];
+                out[1] = pixel[2];
+                out[2] = pixel[1];
+                out[3] = pixel[0];
+                break;
+            }
+            default:
+                g_assert_not_reached();
+            }
+        }
+    }
+}
+
+static void android_surface_rgba8_to_guest(const SurfaceBinding *surface,
+                                           const uint8_t *src,
+                                           unsigned int src_stride,
+                                           unsigned int width,
+                                           unsigned int height,
+                                           uint8_t *dst,
+                                           unsigned int dst_stride)
+{
+    unsigned int x, y;
+
+    switch (surface->shape.color_format) {
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+        for (y = 0; y < height; y++) {
+            const uint8_t *src_row = src + y * src_stride;
+            uint8_t *dst_row = dst + y * dst_stride;
+            for (x = 0; x < width; x++) {
+                const uint8_t *pixel = src_row + x * 4;
+                uint16_t packed =
+                    0x8000 |
+                    ((uint16_t)(pixel[0] >> 3) << 10) |
+                    ((uint16_t)(pixel[1] >> 3) << 5) |
+                    (uint16_t)(pixel[2] >> 3);
+                stw_le_p(dst_row + x * 2, packed);
+            }
+        }
+        break;
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8:
+        for (y = 0; y < height; y++) {
+            const uint8_t *src_row = src + y * src_stride;
+            uint8_t *dst_row = dst + y * dst_stride;
+            for (x = 0; x < width; x++) {
+                const uint8_t *pixel = src_row + x * 4;
+                uint8_t *out = dst_row + x * 4;
+                out[0] = pixel[2];
+                out[1] = pixel[1];
+                out[2] = pixel[0];
+                out[3] =
+                    (surface->shape.color_format ==
+                     NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8)
+                        ? pixel[3]
+                        : 0xFF;
+            }
+        }
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static bool android_surface_to_texture_rgba8_compatible(
+    const SurfaceBinding *surface,
+    const TextureShape *shape)
+{
+    if (!surface || !shape || !surface->color || shape->cubemap ||
+        shape->levels > 1) {
+        return false;
+    }
+
+    switch (surface->shape.color_format) {
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+        switch (shape->color_format) {
+        case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X1R5G5B5:
+        case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X1R5G5B5:
+        case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A1R5G5B5:
+        case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A1R5G5B5:
+            return true;
+        default:
+            return false;
+        }
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
+        switch (shape->color_format) {
+        case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R5G6B5:
+        case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R5G6B5:
+            return true;
+        default:
+            return false;
+        }
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8:
+        switch (shape->color_format) {
+        case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X8R8G8B8:
+        case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X8R8G8B8:
+            return true;
+        default:
+            return false;
+        }
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8:
+        switch (shape->color_format) {
+        case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8R8G8B8:
+        case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A8R8G8B8:
+        case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8B8G8R8:
+        case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A8B8G8R8:
+        case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_B8G8R8A8:
+        case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_B8G8R8A8:
+        case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R8G8B8A8:
+        case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R8G8B8A8:
+            return true;
+        default:
+            return false;
+        }
+    default:
+        return false;
     }
 }
 #endif
@@ -225,6 +523,12 @@ static bool surface_to_texture_can_fastpath(SurfaceBinding *surface,
         return false;
     }
 
+#ifdef __ANDROID__
+    if (android_surface_to_texture_rgba8_compatible(surface, shape)) {
+        return true;
+    }
+#endif
+
     switch (surface_fmt) {
     case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5: switch (texture_fmt) {
         case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X1R5G5B5: return true;
@@ -339,7 +643,9 @@ static bool render_surface_to(NV2AState *d, SurfaceBinding *surface,
     glDisable(GL_STENCIL_TEST);
     glDisable(GL_CULL_FACE);
     glDisable(GL_DEPTH_TEST);
+#ifndef __ANDROID__ /* glPolygonMode not available in GLES 3.x core */
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+#endif
     glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -369,6 +675,30 @@ static void render_surface_to_texture_slow(NV2AState *d,
     glActiveTexture(GL_TEXTURE0 + texture_unit);
     glBindTexture(texture->gl_target, texture->gl_texture);
 
+#ifdef __ANDROID__
+    if (android_surface_to_texture_rgba8_compatible(surface, texture_shape) &&
+        !android_surface_to_texture_needs_guest_reinterpretation(surface,
+                                                                 texture_shape) &&
+        texture->gl_target == GL_TEXTURE_2D) {
+        unsigned int tex_width = texture_shape->width;
+        unsigned int tex_height = texture_shape->height;
+
+        pgraph_apply_scaling_factor(pg, &tex_width, &tex_height);
+
+        glTexImage2D(texture->gl_target, 0, GL_RGBA8, tex_width, tex_height,
+                     0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glBindTexture(texture->gl_target, 0);
+
+        if (render_surface_to(d, surface, texture_unit, texture->gl_target,
+                              texture->gl_texture, tex_width, tex_height)) {
+            glBindTexture(texture->gl_target, texture->gl_texture);
+            return;
+        }
+
+        glBindTexture(texture->gl_target, texture->gl_texture);
+    }
+#endif
+
     unsigned int width = surface->width,
                  height = surface->height;
     pgraph_apply_scaling_factor(pg, &width, &height);
@@ -382,6 +712,24 @@ static void render_surface_to_texture_slow(NV2AState *d,
     height = texture_shape->height;
     pgraph_apply_scaling_factor(pg, &width, &height);
 
+#ifdef __ANDROID__
+    if (android_surface_to_texture_rgba8_compatible(surface, texture_shape)) {
+        uint8_t *upload_tmp = g_malloc(width * height * 4);
+        if (android_surface_to_texture_needs_guest_reinterpretation(
+                surface, texture_shape)) {
+            android_surface_guest_to_texture_rgba8(
+                texture_shape, buf, width, height,
+                width * surface->fmt.bytes_per_pixel, upload_tmp);
+        } else {
+            android_surface_guest_to_rgba8(surface, buf, width, height,
+                                           width * surface->fmt.bytes_per_pixel,
+                                           upload_tmp);
+        }
+        glTexImage2D(texture->gl_target, 0, GL_RGBA8, width, height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, upload_tmp);
+        g_free(upload_tmp);
+    } else
+#endif
     glTexImage2D(texture->gl_target, 0, f->gl_internal_format, width, height, 0,
                  f->gl_format, f->gl_type, buf);
     g_free(buf);
@@ -420,6 +768,14 @@ void pgraph_gl_render_surface_to_texture(NV2AState *d, SurfaceBinding *surface,
     glTexParameteri(texture->gl_target, GL_TEXTURE_BASE_LEVEL, 0);
     glTexParameteri(texture->gl_target, GL_TEXTURE_MAX_LEVEL, 0);
     glTexParameteri(texture->gl_target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+#ifdef __ANDROID__
+    if (android_surface_to_texture_rgba8_compatible(surface, texture_shape) &&
+        !android_surface_to_texture_needs_guest_reinterpretation(surface,
+                                                                 texture_shape)) {
+        glTexImage2D(texture->gl_target, 0, GL_RGBA8, width, height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    } else
+#endif
     glTexImage2D(texture->gl_target, 0, f->gl_internal_format, width, height, 0,
                  f->gl_format, f->gl_type, NULL);
     glBindTexture(texture->gl_target, 0);
@@ -463,6 +819,12 @@ bool pgraph_gl_check_surface_to_texture_compatibility(
         // FIXME: Support rendering surface to mip levels
         return false;
     }
+
+#ifdef __ANDROID__
+    if (android_surface_to_texture_rgba8_compatible(surface, shape)) {
+        return true;
+    }
+#endif
 
     switch (surface_fmt) {
     case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5: switch (texture_fmt) {
@@ -871,6 +1233,50 @@ static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
     }
 
     /* Read surface into memory */
+#ifdef __ANDROID__
+    if (android_surface_uses_rgba8_transfer(surface)) {
+        const unsigned int factor = downscale ? pg->surface_scale_factor : 1;
+        const unsigned int read_width = surface->width * factor;
+        const unsigned int read_height = surface->height * factor;
+        const unsigned int rgba_stride = read_width * 4;
+        uint8_t *rgba_pixels = g_malloc(read_height * rgba_stride);
+        uint8_t *rgba_linear = rgba_pixels;
+        uint8_t *linear_guest = pixels;
+
+        glo_readpixels(GL_RGBA, GL_UNSIGNED_BYTE, 4, rgba_stride,
+                       read_width, read_height, flip, rgba_pixels);
+
+        if (downscale) {
+            rgba_linear = g_malloc(surface->width * surface->height * 4);
+            for (unsigned int y = 0; y < surface->height; y++) {
+                surface_copy_shrink_row(rgba_linear + y * surface->width * 4,
+                                        rgba_pixels + y * rgba_stride * factor,
+                                        surface->width, 4, factor);
+            }
+        }
+
+        if (swizzle) {
+            linear_guest = g_malloc(surface->size);
+        }
+
+        android_surface_rgba8_to_guest(surface, rgba_linear, surface->width * 4,
+                                       surface->width, surface->height,
+                                       linear_guest, surface->pitch);
+
+        if (swizzle) {
+            swizzle_rect(linear_guest, surface->width, surface->height, pixels,
+                         surface->pitch, surface->fmt.bytes_per_pixel);
+            g_free(linear_guest);
+        }
+
+        if (rgba_linear != rgba_pixels) {
+            g_free(rgba_linear);
+        }
+        g_free(rgba_pixels);
+        goto cleanup;
+    }
+#endif
+
     uint8_t *gl_read_buf = pixels;
 
     uint8_t *swizzle_buf = pixels;
@@ -1117,38 +1523,31 @@ void pgraph_gl_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     }
 
     glBindTexture(GL_TEXTURE_2D, surface->gl_buffer);
+#ifdef __ANDROID__
+    {
+        const uint8_t *upload_buf = gl_read_buf;
+        uint8_t *upload_tmp = NULL;
+        GLint upload_ifmt;
+        GLenum upload_fmt;
+        GLenum upload_type;
+
+        android_surface_get_storage_format(surface, &upload_ifmt, &upload_fmt,
+                                           &upload_type);
+        if (android_surface_uses_rgba8_transfer(surface)) {
+            upload_tmp = g_malloc(width * height * 4);
+            android_surface_guest_to_rgba8(surface, gl_read_buf, width, height,
+                                           width * surface->fmt.bytes_per_pixel,
+                                           upload_tmp);
+            upload_buf = upload_tmp;
+        }
+        glTexImage2D(GL_TEXTURE_2D, 0, upload_ifmt, width, height, 0,
+                     upload_fmt, upload_type, upload_buf);
+        g_free(upload_tmp);
+    }
+#else
     glTexImage2D(GL_TEXTURE_2D, 0, surface->fmt.gl_internal_format, width,
                  height, 0, surface->fmt.gl_format, surface->fmt.gl_type,
                  gl_read_buf);
-#ifdef __ANDROID__
-    {
-        static unsigned int upload_fail_log = 0;
-        GLenum err = glGetError();
-        if (err != GL_NO_ERROR) {
-            if (upload_fail_log++ < 20) {
-                __android_log_print(ANDROID_LOG_WARN, "xemu-android",
-                                    "surface upload glTexImage2D err=0x%X ifmt=%d fmt=%d type=%d size=%ux%u bpp=%u vram=0x%x",
-                                    err,
-                                    surface->fmt.gl_internal_format,
-                                    surface->fmt.gl_format,
-                                    surface->fmt.gl_type,
-                                    width, height,
-                                    surface->fmt.bytes_per_pixel,
-                                    (unsigned)surface->vram_addr);
-            }
-            if (surface->fmt.bytes_per_pixel == 4) {
-                // Fallback to a byte-based RGBA upload to avoid invalid enum combos.
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
-                             GL_RGBA, GL_UNSIGNED_BYTE, gl_read_buf);
-                err = glGetError();
-                if (err != GL_NO_ERROR && upload_fail_log++ < 20) {
-                    __android_log_print(ANDROID_LOG_WARN, "xemu-android",
-                                        "surface upload fallback err=0x%X",
-                                        err);
-                }
-            }
-        }
-    }
 #endif
     glPixelStorei(GL_UNPACK_ALIGNMENT, prev_unpack_alignment);
     if (optimal_buf != buf) {
@@ -1419,9 +1818,22 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
             unsigned int width = entry.width ? entry.width : 1;
             unsigned int height = entry.height ? entry.height : 1;
             pgraph_apply_scaling_factor(pg, &width, &height);
+#ifdef __ANDROID__
+            {
+                GLint storage_ifmt;
+                GLenum storage_fmt;
+                GLenum storage_type;
+
+                android_surface_get_storage_format(&entry, &storage_ifmt,
+                                                   &storage_fmt, &storage_type);
+                glTexImage2D(GL_TEXTURE_2D, 0, storage_ifmt, width, height, 0,
+                             storage_fmt, storage_type, NULL);
+            }
+#else
             glTexImage2D(GL_TEXTURE_2D, 0, entry.fmt.gl_internal_format, width,
                          height, 0, entry.fmt.gl_format, entry.fmt.gl_type,
                          NULL);
+#endif
             found = surface_put(d, entry.vram_addr, &entry);
 
             /* FIXME: Refactor */

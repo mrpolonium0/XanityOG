@@ -577,14 +577,17 @@ cleanup:
 }
 
 struct EmulatorSettings {
-  int surface_scale    = 1;         // 1, 2, or 3
-  int frame_rate_limit = 60;        // 30 or 60
-  int system_memory_mib = 64;       // 64 or 128
-  std::string tcg_thread = "multi"; // "single" or "multi"
+  int surface_scale    = 1;           // 1, 2, or 3
+  int frame_rate_limit = 60;          // 30 or 60
+  int system_memory_mib = 64;         // 64 or 128
+  std::string tcg_thread = "multi";   // "single" or "multi"
+  std::string renderer = "vulkan";    // "vulkan" or "opengl"
+  std::string filtering = "linear";   // "linear" or "nearest"
   bool use_dsp         = false;
   bool hrtf            = true;
   bool cache_shaders   = true;
   bool hard_fpu        = true;
+  bool vsync           = false;
   bool skip_boot_anim  = false;
 };
 
@@ -645,13 +648,13 @@ static bool WriteConfigToml(const std::string& config_path,
 
   general->insert_or_assign("show_welcome", false);
   general->insert_or_assign("skip_boot_anim", settings.skip_boot_anim);
-  display->insert_or_assign("renderer", "vulkan");
-  if (!display->contains("filtering")) {
-    display->insert_or_assign("filtering", "nearest");
+  {
+    const std::string r = (settings.renderer == "opengl") ? "opengl" : "vulkan";
+    display->insert_or_assign("renderer", r);
   }
-  if (!display_window->contains("vsync")) {
-    display_window->insert_or_assign("vsync", false);
-  }
+  display->insert_or_assign(
+      "filtering", settings.filtering == "nearest" ? "nearest" : "linear");
+  display_window->insert_or_assign("vsync", settings.vsync);
   // User-controlled settings (always written so they take effect immediately)
   {
     int scale = settings.surface_scale;
@@ -677,9 +680,6 @@ static bool WriteConfigToml(const std::string& config_path,
   }
   if (!audio->contains("volume_limit")) {
     audio->insert_or_assign("volume_limit", 1.0);
-  }
-  if (!android->contains("force_cpu_blit")) {
-    android->insert_or_assign("force_cpu_blit", false);
   }
   if (!android->contains("tcg_tuning")) {
     android->insert_or_assign("tcg_tuning", true);
@@ -830,6 +830,19 @@ static SetupFiles SyncSetupFiles() {
       emuSettings.tcg_thread = "single";
     }
   }
+  {
+    std::string rendererPref = GetPrefString(env, activity, "setting_renderer");
+    if (rendererPref == "opengl") {
+      emuSettings.renderer = "opengl";
+    }
+  }
+  {
+    std::string filteringPref = GetPrefString(env, activity, "setting_filtering");
+    if (filteringPref == "nearest") {
+      emuSettings.filtering = "nearest";
+    }
+  }
+  emuSettings.vsync = GetPrefBool(env, activity, "setting_vsync", false);
   out.audio_driver = GetPrefString(env, activity, "setting_audio_driver");
 
   int displayMode = GetPrefInt(env, activity, "setting_display_mode", 0);
@@ -988,12 +1001,13 @@ extern "C" int SDL_main(int argc, char* argv[]) {
     } else if (!g_config.sys.files.eeprom_path) {
       xemu_settings_set_string(&g_config.sys.files.eeprom_path, "");
     }
-    setenv("XEMU_ANDROID_FORCE_CPU_BLIT", "0", 1);
     g_config.general.show_welcome = false;
     g_config.perf.cache_shaders = true;
     LogInfoInt("Config final show_welcome=%d", g_config.general.show_welcome ? 1 : 0);
     LogInfoInt("Config final cache_shaders=%d", g_config.perf.cache_shaders ? 1 : 0);
-    LogInfoInt("Config final renderer=%d", (int)g_config.display.renderer);
+    LogInfoFmt("Config final renderer=%s",
+               (g_config.display.renderer == 0) ? "Vulkan" :
+               (g_config.display.renderer == 1) ? "OpenGL" : "Null");
     LogInfoFmt("Config final bootrom=%s", g_config.sys.files.bootrom_path ? g_config.sys.files.bootrom_path : "(null)");
     LogInfoFmt("Config final flashrom=%s", g_config.sys.files.flashrom_path ? g_config.sys.files.flashrom_path : "(null)");
     LogInfoFmt("Config final hdd=%s", g_config.sys.files.hdd_path ? g_config.sys.files.hdd_path : "(null)");

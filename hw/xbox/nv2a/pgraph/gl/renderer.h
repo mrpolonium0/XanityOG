@@ -242,6 +242,7 @@ typedef struct PGRAPHGLState {
 
     struct supported_extensions {
         GLboolean texture_filter_anisotropic;
+        GLfloat max_texture_max_anisotropy;
     } supported_extensions;
 
 #ifdef __ANDROID__

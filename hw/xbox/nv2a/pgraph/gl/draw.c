@@ -163,7 +163,6 @@ void pgraph_gl_draw_begin(NV2AState *d)
     assert(r->color_binding || r->zeta_binding);
 
     pgraph_gl_bind_textures(d);
-    pgraph_gl_bind_shaders(pg);
 
     glColorMask(mask_red, mask_green, mask_blue, mask_alpha);
     glDepthMask(!!(control_0 & NV_PGRAPH_CONTROL_0_ZWRITEENABLE));
@@ -215,8 +214,10 @@ void pgraph_gl_draw_begin(NV2AState *d)
 
     /* Polygon offset is handled in geometry and fragment shaders explicitly */
     glDisable(GL_POLYGON_OFFSET_FILL);
+#ifndef __ANDROID__ /* GL_POLYGON_OFFSET_LINE/POINT not valid in GLES 3.x */
     glDisable(GL_POLYGON_OFFSET_LINE);
     glDisable(GL_POLYGON_OFFSET_POINT);
+#endif
 
     /* Depth testing */
     if (depth_test) {
@@ -234,8 +235,10 @@ void pgraph_gl_draw_begin(NV2AState *d)
     glEnable(GL_DEPTH_CLAMP);
 #endif
 
+#ifndef __ANDROID__ /* glProvokingVertex not available in GLES 3.x */
     /* Set first vertex convention to match Vulkan default */
     glProvokingVertex(GL_FIRST_VERTEX_CONVENTION);
+#endif
 
     if (stencil_test) {
         glEnable(GL_STENCIL_TEST);
@@ -281,7 +284,11 @@ void pgraph_gl_draw_begin(NV2AState *d)
         glDisable(GL_DITHER);
     }
 
+#ifndef __ANDROID__
+    /* GL_PROGRAM_POINT_SIZE is not a valid enum in GLES 3.x;
+     * point size from gl_PointSize is always enabled in GLES. */
     glEnable(GL_PROGRAM_POINT_SIZE);
+#endif
 
     bool anti_aliasing = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_ANTIALIASING), NV_PGRAPH_ANTIALIASING_ENABLE);
 
@@ -328,6 +335,9 @@ void pgraph_gl_draw_begin(NV2AState *d)
     glScissor(xmin, ymin, scissor_width, scissor_height);
 
     /* Visibility testing */
+    /* GL_SAMPLES_PASSED is desktop-only; GLES has GL_ANY_SAMPLES_PASSED but
+     * only returns boolean. Skip occlusion queries entirely on Android. */
+#ifndef __ANDROID__
     if (pg->zpass_pixel_count_enable) {
         r->gl_zpass_pixel_count_query_count++;
         r->gl_zpass_pixel_count_queries = (GLuint*)g_realloc(
@@ -340,6 +350,7 @@ void pgraph_gl_draw_begin(NV2AState *d)
             r->gl_zpass_pixel_count_query_count - 1] = gl_query;
         glBeginQuery(GL_SAMPLES_PASSED, gl_query);
     }
+#endif
 }
 
 void pgraph_gl_draw_end(NV2AState *d)
@@ -373,10 +384,12 @@ void pgraph_gl_draw_end(NV2AState *d)
     pgraph_gl_flush_draw(d);
 
     /* End of visibility testing */
+#ifndef __ANDROID__
     if (pg->zpass_pixel_count_enable) {
         nv2a_profile_inc_counter(NV2A_PROF_QUERY);
         glEndQuery(GL_SAMPLES_PASSED);
     }
+#endif
 
     pg->draw_time++;
 #ifdef __ANDROID__
@@ -400,7 +413,6 @@ void pgraph_gl_flush_draw(NV2AState *d)
     if (!(r->color_binding || r->zeta_binding)) {
         return;
     }
-    assert(r->shader_binding);
 
     PrimAssemblyState assembly = {
         .primitive_mode = pg->primitive_mode,
@@ -426,6 +438,7 @@ void pgraph_gl_flush_draw(NV2AState *d)
                                       pg->draw_arrays_max_count - 1,
                                       false, 0,
                                       pg->draw_arrays_max_count - 1);
+        pgraph_gl_bind_shaders(pg);
 
         PrimRewrite prim_rw = pgraph_prim_rewrite_ranges(
             &r->prim_rewrite_buf, assembly, pg->draw_arrays_start,
@@ -469,6 +482,7 @@ void pgraph_gl_flush_draw(NV2AState *d)
         pgraph_gl_bind_vertex_attributes(
                 d, min_element, max_element, false, 0,
                 draw_indices[draw_index_count - 1]);
+        pgraph_gl_bind_shaders(pg);
 
         if (prim_rw.num_indices > 0) {
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->gl_prim_rewrite_buffer);
@@ -508,10 +522,12 @@ void pgraph_gl_flush_draw(NV2AState *d)
         nv2a_profile_inc_counter(NV2A_PROF_INLINE_BUFFERS);
         assert(pg->inline_array_length == 0);
 
-        if (pg->compressed_attrs) {
+        if (pg->compressed_attrs || pg->swizzle_attrs || pg->uniform_attrs) {
             pg->compressed_attrs = 0;
-            pgraph_gl_bind_shaders(pg);
+            pg->uniform_attrs = 0;
+            pg->swizzle_attrs = 0;
         }
+        pgraph_gl_bind_shaders(pg);
 
         for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {
             VertexAttribute *attr = &pg->vertex_attributes[i];
@@ -552,6 +568,7 @@ void pgraph_gl_flush_draw(NV2AState *d)
         nv2a_profile_inc_counter(NV2A_PROF_INLINE_ARRAYS);
 
         unsigned int index_count = pgraph_gl_bind_inline_array(d);
+        pgraph_gl_bind_shaders(pg);
 
         PrimRewrite prim_rw = pgraph_prim_rewrite_sequential(
             &r->prim_rewrite_buf, assembly, 0, index_count);

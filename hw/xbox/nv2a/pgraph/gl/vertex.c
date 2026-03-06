@@ -80,6 +80,8 @@ void pgraph_gl_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
     }
 
     pg->compressed_attrs = 0;
+    pg->uniform_attrs = 0;
+    pg->swizzle_attrs = 0;
 
     for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {
         VertexAttribute *attr = &pg->vertex_attributes[i];
@@ -97,13 +99,21 @@ void pgraph_gl_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
         GLenum gl_type;
         GLboolean gl_normalize;
         bool needs_conversion = false;
+        bool d3d_swizzle = false;
 
         switch (attr->format) {
         case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_UB_D3D:
             gl_type = GL_UNSIGNED_BYTE;
             gl_normalize = GL_TRUE;
+#ifdef __ANDROID__
+            gl_count = attr->count;
+            if (attr->count == 4) {
+                d3d_swizzle = true;
+            }
+#else
             // http://www.opengl.org/registry/specs/ARB/vertex_array_bgra.txt
             gl_count = GL_BGRA;
+#endif
             break;
         case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_UB_OGL:
             gl_type = GL_UNSIGNED_BYTE;
@@ -188,6 +198,9 @@ void pgraph_gl_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
         }
 
         glEnableVertexAttribArray(i);
+        if (d3d_swizzle) {
+            pg->swizzle_attrs |= (1 << i);
+        }
         last_entry += stride * provoking_element_index;
         pgraph_update_inline_value(attr, last_entry);
     }

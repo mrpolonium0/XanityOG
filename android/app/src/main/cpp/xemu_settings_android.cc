@@ -68,7 +68,7 @@ static void xemu_settings_apply_defaults(void)
     g_config.input.keyboard_controller_scancode_map.rtrigger = 18;
 
     g_config.display.renderer = CONFIG_DISPLAY_RENDERER_VULKAN;
-    g_config.display.filtering = CONFIG_DISPLAY_FILTERING_NEAREST;
+    g_config.display.filtering = CONFIG_DISPLAY_FILTERING_LINEAR;
     g_config.display.quality.surface_scale = 1;
     g_config.display.window.fullscreen_on_startup = false;
     g_config.display.window.fullscreen_exclusive = false;
@@ -209,7 +209,6 @@ bool xemu_settings_load(void)
 
     xemu_settings_apply_defaults();
     error_msg.clear();
-    setenv("XEMU_ANDROID_FORCE_CPU_BLIT", "0", 1);
     setenv("XEMU_ANDROID_TCG_TUNING", "1", 1);
     setenv("XEMU_ANDROID_TCG_THREAD", "multi", 1);
     setenv("XEMU_ANDROID_TCG_TB_SIZE", "128", 1);
@@ -247,13 +246,17 @@ bool xemu_settings_load(void)
             g_config.general.skip_boot_anim = *skip_boot_anim;
         }
 
-        // Display settings - force Vulkan on Android
-        g_config.display.renderer = CONFIG_DISPLAY_RENDERER_VULKAN;
+        // Display settings
         if (auto renderer = display["renderer"].value<std::string>()) {
             CONFIG_DISPLAY_RENDERER parsed;
-            if (parse_renderer(*renderer, &parsed) && parsed != CONFIG_DISPLAY_RENDERER_VULKAN) {
+            if (parse_renderer(*renderer, &parsed)) {
+                g_config.display.renderer = parsed;
+                __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                                    "Config display.renderer=%s (%d)",
+                                    renderer->c_str(), (int)parsed);
+            } else {
                 __android_log_print(ANDROID_LOG_WARN, "xemu-android",
-                                    "Config display.renderer=%s requested, but Android forces Vulkan",
+                                    "Config display.renderer=%s unknown, using default",
                                     renderer->c_str());
             }
         }
@@ -311,9 +314,6 @@ bool xemu_settings_load(void)
         }
 
         // Android-specific settings
-        if (auto force_cpu_blit = android_cfg["force_cpu_blit"].value<bool>()) {
-            setenv("XEMU_ANDROID_FORCE_CPU_BLIT", *force_cpu_blit ? "1" : "0", 1);
-        }
         if (auto egl_offscreen = android_cfg["egl_offscreen"].value<bool>()) {
             if (!*egl_offscreen) {
                 setenv("XEMU_ANDROID_EGL_OFFSCREEN", "0", 1);

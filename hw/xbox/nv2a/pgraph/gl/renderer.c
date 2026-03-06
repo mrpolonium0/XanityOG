@@ -126,7 +126,12 @@ static void pgraph_gl_init(NV2AState *d, Error **errp)
     assert(glo_check_extension("GL_ARB_ES2_compatibility"));
 #endif
 
+#ifndef __ANDROID__ /* GL_SMOOTH_LINE_WIDTH_RANGE not valid in GLES 3.x */
     glGetFloatv(GL_SMOOTH_LINE_WIDTH_RANGE, r->supported_smooth_line_width_range);
+#else
+    r->supported_smooth_line_width_range[0] = 1.0f;
+    r->supported_smooth_line_width_range[1] = 1.0f;
+#endif
     glGetFloatv(GL_ALIASED_LINE_WIDTH_RANGE, r->supported_aliased_line_width_range);
 
     pgraph_gl_init_surfaces(pg);
@@ -143,6 +148,14 @@ static void pgraph_gl_init(NV2AState *d, Error **errp)
 
     r->supported_extensions.texture_filter_anisotropic =
         glo_check_extension("GL_EXT_texture_filter_anisotropic");
+    r->supported_extensions.max_texture_max_anisotropy = 1.0f;
+    if (r->supported_extensions.texture_filter_anisotropic) {
+        glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT,
+                    &r->supported_extensions.max_texture_max_anisotropy);
+        if (r->supported_extensions.max_texture_max_anisotropy < 1.0f) {
+            r->supported_extensions.max_texture_max_anisotropy = 1.0f;
+        }
+    }
 }
 
 static void pgraph_gl_finalize(NV2AState *d)
