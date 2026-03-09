@@ -78,6 +78,7 @@
 
   <string name="settings_title">Settings</string>
   <string name="settings_save">Save</string>
+  <string name="settings_redo_setup_wizard">Redo Setup Wizard</string>
 
   <string name="settings_section_display">Display</string>
   <string name="settings_graphics_api">Graphics API</string>
